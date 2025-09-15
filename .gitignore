@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.venv/
+venv/
+.env
+.env.*
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+
+# Logs & reports
+*.log
+*.tmp
+*.cache/
+.coverage
+.pytest_cache/
+
+# Project specific
+uploads/
+ffmpeg.zip
+.taskmaster/
+.trae/
+response.json
+
+# Media (avoid committing large binaries)
+*.wav
+*.mp3
+*.m4a
+*.webm
+*.mp4
+*.avi
+*.mov
+
+# Node (if any)
+node_modules/

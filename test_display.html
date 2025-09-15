@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Тест отображения результатов</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <style>
+        body {
+            padding: 20px;
+            background: white;
+        }
+        button {
+            margin: 10px 0;
+            padding: 10px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Тест отображения результатов транскрипции</h1>
+    
+    <button id="testBtn">Показать результат</button>
+    
+    <div class="result-section" id="resultSection" style="display: none;">
+        <div class="result-header">
+            <h3>Результат транскрибации</h3>
+            <div class="result-actions">
+                <button id="copyBtn" class="action-btn">
+                    <i class="fas fa-copy"></i>
+                    Копировать
+                </button>
+                <button id="downloadBtn" class="action-btn">
+                    <i class="fas fa-download"></i>
+                    Скачать
+                </button>
+            </div>
+        </div>
+        <div class="result-content">
+            <div class="result-info">
+                <span class="info-item">Язык: <span id="detectedLanguage">Русский</span></span>
+                <span class="info-item">Длительность: <span id="duration">1:30</span></span>
+            </div>
+            <div class="result-text" id="resultText">Тестовый текст транскрипции. Это должно отображаться в блоке результатов.</div>
+        </div>
+    </div>
+
+    <script>
+        document.getElementById('testBtn').addEventListener('click', function() {
+            const resultSection = document.getElementById('resultSection');
+            if (resultSection.style.display === 'none') {
+                resultSection.style.display = 'block';
+                this.textContent = 'Скрыть результат';
+            } else {
+                resultSection.style.display = 'none';
+                this.textContent = 'Показать результат';
+            }
+        });
+    </script>
+</body>
+</html>
