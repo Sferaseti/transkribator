@@ -222,14 +222,14 @@ class WhisperTranscriber {
             this.currentBlobUrl = null;
             
             // Проверка типа файла
-            const allowedTypes = ['audio/wav', 'audio/mp3', 'audio/mpeg', 'audio/mp4', 'audio/m4a', 'audio/ogg', 'audio/flac', 'audio/x-m4a', 'audio/x-wav', 'audio/x-mpeg', 'video/mp4', 'video/avi', 'video/mov', 'video/wmv', 'video/mkv', 'video/webm', 'video/quicktime', 'video/x-matroska', 'video/x-msvideo', 'text/plain'];
-            const allowedExtensions = ['wav', 'mp3', 'mp4', 'mpeg', 'mpga', 'm4a', 'ogg', 'flac', 'avi', 'mov', 'wmv', 'mkv', 'webm', 'txt'];
+            const allowedTypes = ['audio/wav', 'audio/mp3', 'audio/mpeg', 'audio/mp4', 'audio/m4a', 'audio/ogg', 'audio/flac', 'audio/x-m4a', 'audio/x-wav', 'audio/x-mpeg', 'video/mp4', 'video/avi', 'video/mov', 'video/wmv', 'video/mkv', 'video/webm', 'video/quicktime', 'video/x-matroska', 'video/x-msvideo'];
+            const allowedExtensions = ['wav', 'mp3', 'mp4', 'mpeg', 'mpga', 'm4a', 'ogg', 'flac', 'avi', 'mov', 'wmv', 'mkv', 'webm'];
             
             const fileExtension = file.name.split('.').pop().toLowerCase();
             const isVideo = file.type.startsWith('video/') || ['mp4', 'avi', 'mov', 'wmv', 'mkv', 'webm'].includes(fileExtension);
             
             if (!allowedTypes.includes(file.type) && !allowedExtensions.includes(fileExtension)) {
-                throw new Error('Неподдерживаемый формат файла. Пожалуйста, выберите аудио, видео или текстовый файл.');
+                throw new Error('Неподдерживаемый формат файла. Пожалуйста, выберите аудио или видео файл.');
             }
             
             // Дополнительная проверка для видео файлов
@@ -249,26 +249,16 @@ class WhisperTranscriber {
             this.updateUploadArea();
             this.hideError();
 
-            // Если это текстовый файл, скрываем элементы для аудио/видео
-            if (fileExtension === 'txt' || file.type === 'text/plain') {
-                if (this.modelSelectGroup) {
-                    this.modelSelectGroup.style.display = 'none';
-                }
-                if (this.timeEstimate) {
-                    this.timeEstimate.style.display = 'none';
-                }
-                this.transcribeBtn.innerHTML = '<i class="fas fa-play"></i><span class="btn-text">Начать транскрибацию</span>';
-            } else {
-                if (this.modelSelectGroup) {
-                    this.modelSelectGroup.style.display = 'block';
-                }
-                try {
-                    await this.getAudioDuration(file);
-                } catch (error) {
-                    console.warn('Ошибка при получении длительности:', error);
-                }
-                this.transcribeBtn.innerHTML = '<i class="fas fa-play"></i><span class="btn-text">Начать транскрибацию</span>';
+            // Показываем элементы для аудио/видео
+            if (this.modelSelectGroup) {
+                this.modelSelectGroup.style.display = 'block';
             }
+            try {
+                await this.getAudioDuration(file);
+            } catch (error) {
+                console.warn('Ошибка при получении длительности:', error);
+            }
+            this.transcribeBtn.innerHTML = '<i class="fas fa-play"></i><span class="btn-text">Начать транскрибацию</span>';
 
             // Если все проверки прошли успешно, сохраняем временный URL как текущий
             this.currentBlobUrl = tempBlobUrl;
@@ -300,8 +290,6 @@ class WhisperTranscriber {
             let fileIcon = 'fa-file-audio';
             if (['mp4', 'avi', 'mov', 'wmv', 'mkv', 'webm'].includes(fileExtension)) {
                 fileIcon = 'fa-file-video';
-            } else if (fileExtension === 'txt') {
-                fileIcon = 'fa-file-text';
             }
             
             // Создаем информацию о файле
@@ -381,6 +369,10 @@ class WhisperTranscriber {
                 ['mp4', 'avi', 'mov', 'wmv', 'mkv', 'webm'].includes(this.selectedFile.name.split('.').pop().toLowerCase());
             formData.append('file_type', isVideo ? 'video' : 'audio');
             
+            // Добавляем параметры транскрибации
+            formData.append('language', this.languageSelect.value);
+            formData.append('model', this.modelSelect.value);
+            
             // Добавляем параметры для видео без строгой клиентской проверки
             if (isVideo) {
                 // Упрощенная проверка - только базовая валидация
@@ -402,7 +394,7 @@ class WhisperTranscriber {
                 formData.append('validate_audio', 'false');
             }
     
-            let uploadEndpoint = '/upload'; // Всегда используем общий эндпоинт загрузки
+            let uploadEndpoint = '/transcribe'; // Используем единый эндпоинт для загрузки и транскрибации
             this.transcribeBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Загрузка файла...';
             this.transcribeBtn.disabled = true; // Отключаем кнопку только после начала загрузки
             
@@ -453,59 +445,31 @@ class WhisperTranscriber {
                 throw new Error(errorMessage);
             }
 
-            // Безопасный разбор ответа загрузки
-            let uploadResult;
-            const uploadCt = uploadResponse.headers.get('Content-Type') || '';
-            if (uploadCt.includes('application/json')) {
-                uploadResult = await uploadResponse.json();
-            } else {
+            // Проверяем тип ответа от сервера
+            const contentType = uploadResponse.headers.get('Content-Type') || '';
+            if (!contentType.includes('text/event-stream') && !contentType.includes('application/json')) {
                 const text = await uploadResponse.text().catch(() => '');
-                throw new Error(`Неожиданный ответ сервера при загрузке файла: ${text.slice(0, 200) || 'неизвестно'}`);
-            }
-            if (!uploadResult.success) {
-                throw new Error(uploadResult.error || 'Ошибка при загрузке файла');
+                throw new Error(`Неожиданный ответ сервера: ${text.slice(0, 200) || 'неизвестно'}`);
             }
     
-            if (isTextFile) {
-                // Для текстовых файлов показываем результат сразу
-                this.lastResult = { text: uploadResult.text };
-                this.showResult({ text: uploadResult.text, language: 'ru' });
-                // Протокол отключен: игнорируем uploadResult.protocol, если он есть
-            } else {
-                // Для аудио/видео файлов запускаем транскрибацию
-                this.transcribeBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Транскрибация...';
-                
-                const controller = new AbortController();
-                const signal = controller.signal;
-                
-                // Устанавливаем таймер для прерывания транскрибации
-                const transcribeTimeout = isVideo ? 600000 : 300000; // 10 минут для видео, 5 минут для аудио
-                const transcribeTimeoutId = setTimeout(() => controller.abort('timeout'), transcribeTimeout);
+            // Для аудио/видео файлов запускаем транскрибацию
+            this.transcribeBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Транскрибация...';
+            
+            const controller = new AbortController();
+            const signal = controller.signal;
+            
+            // Устанавливаем таймер для прерывания транскрибации
+            const transcribeTimeout = isVideo ? 600000 : 300000; // 10 минут для видео, 5 минут для аудио
+            const transcribeTimeoutId = setTimeout(() => controller.abort('timeout'), transcribeTimeout);
 
-                let transcribeResponse;
-                try {
-                    transcribeResponse = await fetch('/transcribe', {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'Accept': 'text/event-stream, application/json;q=0.9'
-                        },
-                        body: JSON.stringify({
-                            file_path: uploadResult.path,
-                            language: this.languageSelect.value,
-                            model: this.modelSelect.value
-                        }),
-                        signal,
-                        // Добавляем параметры для улучшения обработки сетевых ошибок
-                        mode: 'cors',
-                        credentials: 'same-origin',
-                        keepalive: true,
-                        cache: 'no-cache'
-                    });
-                } catch (fetchError) {
+                // Используем ответ от загрузки файла напрямую
+                let transcribeResponse = uploadResponse;
+                
+                if (!transcribeResponse) {
                     clearTimeout(transcribeTimeoutId);
-                    throw new Error('Ошибка сети при подключении к серверу. Проверьте соединение.');
+                    throw new Error('Не получен ответ от сервера при загрузке файла.');
                 }
+                
                 clearTimeout(transcribeTimeoutId);
 
                 // Store the abort controller for potential cleanup
@@ -535,10 +499,10 @@ class WhisperTranscriber {
                 }
 
                 // Handle streamed or JSON response
-                const contentType = transcribeResponse.headers.get('Content-Type') || '';
-                if (contentType.includes('text/event-stream')) {
+                const responseContentType = transcribeResponse.headers.get('Content-Type') || '';
+                if (responseContentType.includes('text/event-stream')) {
                     await this.handleSSE(transcribeResponse);
-                } else if (contentType.includes('application/json')) {
+                } else if (responseContentType.includes('application/json')) {
                     const result = await transcribeResponse.json();
                     this.lastResult = result;
                     this.showResult(result);
@@ -546,7 +510,6 @@ class WhisperTranscriber {
                     const text = await transcribeResponse.text();
                     throw new Error(`Неожиданный ответ сервера при транскрибации: ${text.slice(0, 200) || 'неизвестно'}`);
                 }
-            }
         } catch (error) {
             if (error.name === 'AbortError' || error.message.includes('aborted')) {
                 console.log('Операция была прервана:', error);
