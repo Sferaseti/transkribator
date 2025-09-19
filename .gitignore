@@ -1,42 +1,69 @@
 # Python
 __pycache__/
 *.py[cod]
-*.pyo
-*.pyd
+*$py.class
 *.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
 *.egg-info/
-.venv/
-venv/
-.env
-.env.*
+.installed.cfg
+*.egg
 
-# OS / IDE
-.DS_Store
+# Virtual Environment
+venv/
+venv_new/
+ENV/
+env/
+.env
+
+# IDE
 .idea/
 .vscode/
-
-# Logs & reports
-*.log
-*.tmp
-*.cache/
-.coverage
-.pytest_cache/
+*.swp
+*.swo
+.DS_Store
 
 # Project specific
 uploads/
-ffmpeg.zip
-.taskmaster/
-.trae/
-response.json
-
-# Media (avoid committing large binaries)
+transcripts/
+.cache/
+*.log
 *.wav
 *.mp3
-*.m4a
-*.webm
 *.mp4
+*.webm
+*.ogg
+*.flac
+*.m4a
 *.avi
 *.mov
+*.mkv
+*.flv
+*.wmv
 
-# Node (if any)
+# Node
 node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Build
+/dist
+/build
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.db
+*.sqlite3

@@ -1,0 +1,8 @@
+flask==3.0.2
+openai-whisper==20231117
+moviepy==2.0.0.0
+pydub==0.25.1
+torch==2.2.1
+numpy==1.26.4
+werkzeug==3.0.1
+python-dotenv==1.0.1

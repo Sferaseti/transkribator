@@ -49,18 +49,27 @@ MAX_WORKERS = int(os.getenv('MAX_WORKERS', '4'))  # Количество пот�
 MODEL_CONFIGS = {
     'fast': {
         'model': 'base',  # ~39MB, самая быстрая
-        'chunk_duration': 180,  # 3 минуты
-        'fp16': False  # Отключаем FP16 для стабильности на CPU
+        'chunk_duration': 120,  # 2 минуты для лучшего контекста
+        'fp16': True,  # Включаем FP16 для GPU
+        'beam_size': 3,  # Базовый beam search
+        'best_of': 3,
+        'temperature': 0.0  # Детерминированный вывод
     },
     'balanced': {
-        'model': 'small',  # ~244MB, хороший баланс
-        'chunk_duration': 240,  # 4 минуты
-        'fp16': False
+        'model': 'medium',  # ~769MB, оптимальный баланс
+        'chunk_duration': 180,  # 3 минуты
+        'fp16': True,
+        'beam_size': 5,
+        'best_of': 5,
+        'temperature': 0.0
     },
     'quality': {
-        'model': 'medium',  # ~769MB, лучше чем large по скорости
-        'chunk_duration': 300,  # 5 минут
-        'fp16': False
+        'model': 'large',  # ~1.5GB, максимальное качество
+        'chunk_duration': 240,  # 4 минуты
+        'fp16': True,
+        'beam_size': 10,
+        'best_of': 10,
+        'temperature': 0.0
     }
 }
 
@@ -69,22 +78,28 @@ config = MODEL_CONFIGS.get(SPEED_MODE, MODEL_CONFIGS['balanced'])
 # Инициализация модели Whisper
 print(f"🔄 Загрузка модели Whisper ({config['model']}) в режиме {SPEED_MODE}...")
 
-# Определение устройства (пока только CPU для стабильности)
+# Определение устройства (приоритет GPU для качества)
 device = 'cpu'
-if USE_GPU == 'true':
+if USE_GPU == 'auto' or USE_GPU == 'true':
     try:
         import torch
         if torch.cuda.is_available():
             device = 'cuda'
             print("🚀 Используется NVIDIA GPU для ускорения")
+            # Оптимизация CUDA
+            torch.backends.cudnn.benchmark = True
         else:
-            print("⚠️ GPU запрошен, но CUDA недоступна. Используется CPU.")
+            print("⚠️ GPU недоступен. Используется CPU.")
     except ImportError:
         print("⚠️ PyTorch не найден. Используется CPU.")
 else:
-    print("💻 Используется CPU (рекомендуется для стабильности)")
+    print("💻 Используется CPU (не рекомендуется для quality режима)")
 
-model = whisper.load_model(config['model'], device=device)
+model = whisper.load_model(
+    config['model'],
+    device=device,
+    download_root=os.path.expanduser('~/.cache/whisper')
+)
 print(f"✅ Модель загружена на устройство: {device}")
 
 ALLOWED_EXTENSIONS = {
@@ -261,132 +276,83 @@ def chunk_audio_file_parallel(audio_path, chunk_duration=None):
     return sorted(chunks)  # Сортируем для правильного порядка
 
 def transcribe_chunk(chunk_path, language=None):
-    """Транскрибация одного чанка с улучшенной обработкой ошибок"""
+    """Транскрибация отдельного чанка с оптимизированными параметрами"""
     try:
-        # Проверяем существование и размер файла
-        if not os.path.exists(chunk_path):
-            logger.warning(f"Чанк не найден: {chunk_path}")
-            return None
-            
-        file_size = os.path.getsize(chunk_path)
-        if file_size < 1024:  # Менее 1KB
-            logger.warning(f"Чанк слишком мал ({file_size} байт): {chunk_path}")
-            return {
-                "text": "",
-                "segments": [],
-                "warning": f"Файл слишком мал ({file_size} байт)"
-            }
+        # Проверяем наличие CUDA
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        if device == "cuda":
+            # Оптимизации для CUDA
+            torch.backends.cudnn.benchmark = True
+            if hasattr(torch.backends, 'cuda'):
+                torch.backends.cuda.matmul.allow_tf32 = True
         
-        # Проверяем аудио данные через Whisper с улучшенной валидацией
-        try:
-            audio = whisper.load_audio(chunk_path)
-            if len(audio) == 0:
-                logger.warning(f"Пустые аудио данные в чанке: {chunk_path}")
-                return {
-                    "text": "",
-                    "segments": [],
-                    "warning": "Файл не содержит аудио данных"
-                }
-            
-            # Дополнительная проверка на минимальную длину аудио
-            if len(audio) < 1600:  # Менее 0.1 секунды при 16kHz
-                logger.warning(f"Слишком короткие аудио данные в чанке: {chunk_path} ({len(audio)} сэмплов)")
-                return {
-                    "text": "",
-                    "segments": [],
-                    "warning": f"Слишком короткие аудио данные ({len(audio)} сэмплов)"
+        # Базовые параметры транскрибации
+        transcribe_options = {
+            "language": language,
+            "word_timestamps": True,
+            "fp16": config['fp16'],
+            "temperature": config['temperature'],
+            "compression_ratio_threshold": config['compression_ratio_threshold'],
+            "logprob_threshold": config['logprob_threshold'],
+            "no_speech_threshold": config['no_speech_threshold'],
+            "condition_on_previous_text": True,
+            "initial_prompt": None
+        }
+        
+        # Дополнительные параметры для режима quality
+        if SPEED_MODE == 'quality':
+            transcribe_options.update({
+                "beam_size": config['beam_size'],
+                "best_of": config['best_of'],
+                "patience": config['patience'],
+                "temperature": [0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
+                "compression_ratio_threshold": 2.4,
+                "logprob_threshold": -1.0,
+                "no_speech_threshold": 0.6
+            })
+        
+        # Транскрибация
+        result = model.transcribe(chunk_path, **transcribe_options)
+        
+        if not result or not result.get("text", "").strip():
+            logger.warning(f"Пустой результат для чанка {chunk_path}")
+            return None
+        
+        # Проверяем и форматируем сегменты
+        if "segments" in result:
+            formatted_segments = []
+            for segment in result["segments"]:
+                if not isinstance(segment, dict) or not segment.get("text"):
+                    continue
+                    
+                formatted_segment = {
+                    "start": float(segment.get("start", 0)),
+                    "end": float(segment.get("end", 0)),
+                    "text": segment["text"].strip()
                 }
                 
-        except Exception as e:
-            logger.warning(f"Не удалось загрузить аудио из чанка {chunk_path}: {e}")
-            return {
-                "text": "",
-                "segments": [],
-                "warning": f"Не удалось загрузить аудио: {e}"
-            }
+                # Добавляем временные метки слов, если есть
+                if "words" in segment:
+                    formatted_segment["words"] = [
+                        {
+                            "start": float(word.get("start", 0)),
+                            "end": float(word.get("end", 0)),
+                            "text": word["text"].strip(),
+                            "probability": float(word.get("probability", 0))
+                        }
+                        for word in segment["words"]
+                        if isinstance(word, dict) and word.get("text")
+                    ]
+                
+                formatted_segments.append(formatted_segment)
+            
+            result["segments"] = formatted_segments
         
-        # Оптимизированные параметры для скорости с улучшенной обработкой ошибок
-        try:
-            # Убираем language=None чтобы избежать "Unsupported language: auto"
-            if language and language != 'auto':
-                result = model.transcribe(
-                    audio,  # Используем загруженные аудио данные вместо пути к файлу
-                    language=language,
-                    word_timestamps=True,
-                    fp16=config['fp16'],
-                    temperature=0,  # Детерминированный результат
-                    compression_ratio_threshold=2.4,
-                    logprob_threshold=-1.0,
-                    no_speech_threshold=0.6
-                )
-            else:
-                result = model.transcribe(
-                    audio,  # Используем загруженные аудио данные вместо пути к файлу
-                    word_timestamps=True,
-                    fp16=config['fp16'],
-                    temperature=0,  # Детерминированный результат
-                    compression_ratio_threshold=2.4,
-                    logprob_threshold=-1.0,
-                    no_speech_threshold=0.6
-                )
-        except Exception as transcribe_error:
-            # Специальная обработка ошибок транскрибации
-            error_msg = str(transcribe_error)
-            if any(keyword in error_msg.lower() for keyword in ["tensor", "reshape", "size mismatch", "dimension"]):
-                logger.warning(f"Ошибка тензоров при транскрибации чанка {chunk_path}: {error_msg}")
-                return {
-                    "text": "",
-                    "segments": [],
-                    "error": f"Ошибка тензоров: {error_msg}"
-                }
-            else:
-                logger.error(f"Ошибка транскрибации чанка {chunk_path}: {error_msg}")
-                return {
-                    "text": "",
-                    "segments": [],
-                    "error": f"Ошибка транскрибации: {error_msg}"
-                }
-        
-        # Проверяем результат на None и корректность
-        if result is None:
-            logger.warning(f"model.transcribe вернул None для чанка {chunk_path}")
-            return {
-                "text": "",
-                "segments": [],
-                "error": "model.transcribe вернул None"
-            }
-            
-        if not isinstance(result, dict):
-            logger.warning(f"model.transcribe вернул некорректный тип для чанка {chunk_path}: {type(result)}")
-            return {
-                "text": "",
-                "segments": [],
-                "error": f"Некорректный тип результата: {type(result)}"
-            }
-            
-        if not result.get("text", "").strip():
-            logger.warning(f"Пустой результат для чанка {chunk_path}")
-            return {
-                "text": "",
-                "segments": [],
-                "warning": "Пустой результат транскрибации"
-            }
-            
         return result
         
     except Exception as e:
-        error_msg = str(e)
-        if any(keyword in error_msg.lower() for keyword in ["tensor", "reshape", "size mismatch", "dimension"]):
-            logger.warning(f"Проблемы с тензорами в чанке {chunk_path}: {error_msg}")
-        else:
-            logger.error(f"Ошибка при обработке чанка {chunk_path}: {error_msg}")
-        
-        # Возвращаем пустой результат вместо None для совместимости
-        return {
-            "text": "",
-            "segments": [],
-            "error": str(e)
-        }
+        logger.error(f"Ошибка при транскрибации чанка {chunk_path}: {str(e)}")
+        return None
 
 def transcribe_audio_with_progress_optimized(audio_path, language=None):
     """Оптимизированная транскрибация с параллельной обработкой"""
@@ -417,132 +383,126 @@ def transcribe_audio_with_progress_optimized(audio_path, language=None):
             except Exception as e:
                 raise ValueError(f"Файл поврежден: {str(e)}")
         
-        # Используем настройки из конфига
-        duration_limit = config['chunk_duration'] * 2  # Увеличиваем лимит для меньшего количества чанков
+        # Оптимизированное разбиение на чанки
+        chunk_duration = config['chunk_duration']
+        num_chunks = math.ceil(duration / chunk_duration)
         
-        if duration > duration_limit:
-            # Параллельная обработка больших файлов
-            yield {"progress": 15, "status": "Параллельное разбиение на чанки..."}
-            chunks = chunk_audio_file_parallel(audio_path, config['chunk_duration'])
-            
-            if not chunks:
-                raise ValueError("Не удалось создать чанки")
-            
-            yield {"progress": 25, "status": f"Параллельная обработка {len(chunks)} чанков..."}
-            
-            # Параллельная транскрибация чанков
-            full_transcription = []
-            all_segments = []
-            
-            def process_chunk_with_index(args):
-                i, chunk_path = args
-                return i, transcribe_chunk(chunk_path, language)
-            
-            # Ограничиваем количество параллельных процессов для экономии памяти
-            max_parallel = min(MAX_WORKERS, len(chunks), 3)
-            
-            with concurrent.futures.ThreadPoolExecutor(max_workers=max_parallel) as executor:
-                chunk_args = [(i, chunk_path) for i, chunk_path in enumerate(chunks)]
-                futures = [executor.submit(process_chunk_with_index, args) for args in chunk_args]
+        if num_chunks == 0:
+            raise ValueError("Некорректная длительность аудио")
+        
+        # Создаем временную директорию для чанков
+        temp_dir = tempfile.mkdtemp()
+        chunks = []
+        
+        yield {"progress": 20, "status": "Подготовка чанков..."}
+        
+        try:
+            # Разбиваем на чанки с перекрытием для quality режима
+            overlap = 2 if SPEED_MODE == 'quality' else 0  # 2 секунды перекрытия
+            for i in range(num_chunks):
+                start_time = i * chunk_duration
+                end_time = min((i + 1) * chunk_duration + overlap, duration)
                 
-                results = {}
-                completed = 0
+                chunk_path = os.path.join(temp_dir, f"chunk_{i}.wav")
+                ffmpeg_extract_subclip(audio_path, start_time, end_time, chunk_path)
+                chunks.append(chunk_path)
                 
-                for future in concurrent.futures.as_completed(futures):
-                    try:
-                        i, result = future.result()
-                        results[i] = result
-                        completed += 1
-                        
-                        progress = 25 + int((completed / len(chunks)) * 70)
-                        yield {"progress": progress, "status": f"Обработано {completed}/{len(chunks)} чанков"}
-                        
-                    except Exception as e:
-                        logger.error(f"Ошибка в параллельной обработке: {e}")
-            
-            # Собираем результаты в правильном порядке
-            for i in sorted(results.keys()):
-                result = results[i]
-                # Проверяем, что result не None и содержит нужные данные
-                if result is not None and isinstance(result, dict) and result.get("text", "").strip():
-                    full_transcription.append(result["text"])
-                    
-                    if "segments" in result and isinstance(result["segments"], list):
-                        segments = [{
-                            "start": segment.get("start", 0),
-                            "end": segment.get("end", 0),
-                            "text": segment.get("text", "")
-                        } for segment in result["segments"] if isinstance(segment, dict) and segment.get("text")]
-                        all_segments.extend(segments)
-                else:
-                    logger.warning(f"Чанк {i} вернул некорректный результат: {result}")
-            
-            # Очистка временных файлов
-            for chunk_path in chunks:
-                if chunk_path != audio_path:
-                    try:
-                        os.remove(chunk_path)
-                    except:
-                        pass
-            
-            if not full_transcription:
-                raise ValueError("Не удалось обработать ни один чанк")
-                
-            yield {
-                "progress": 100, 
-                "status": "Транскрибация завершена!", 
-                "result": {
-                    "text": " ".join(full_transcription), 
-                    "segments": all_segments
-                }
+                progress = 20 + (30 * (i + 1) / num_chunks)
+                yield {"progress": progress, "status": f"Подготовлен чанк {i + 1} из {num_chunks}"}
+        
+        except Exception as e:
+            logger.error(f"Ошибка при разбиении на чанки: {str(e)}")
+            raise ValueError(f"Ошибка при разбиении на чанки: {str(e)}")
+        
+        # Транскрибация чанков
+        results = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            future_to_chunk = {
+                executor.submit(transcribe_chunk, chunk, language): (i, chunk)
+                for i, chunk in enumerate(chunks)
             }
-        else:
-            # Быстрая обработка небольших файлов
-            yield {"progress": 20, "status": "Быстрая обработка..."}
-            yield {"progress": 50, "status": "Транскрибация..."}
             
-            try:
-                result = model.transcribe(
-                    audio_path, 
-                    language=language,
-                    word_timestamps=True,
-                    fp16=config['fp16'],
-                    temperature=0,
-                    compression_ratio_threshold=2.4,
-                    logprob_threshold=-1.0,
-                    no_speech_threshold=0.6
-                )
+            completed = 0
+            for future in concurrent.futures.as_completed(future_to_chunk):
+                chunk_idx, chunk_path = future_to_chunk[future]
+                try:
+                    result = future.result()
+                    if result:
+                        # Удаляем перекрытие из результата
+                        if SPEED_MODE == 'quality' and chunk_idx > 0:
+                            # Пропускаем первые 2 секунды сегментов (кроме первого чанка)
+                            result['segments'] = [
+                                seg for seg in result['segments']
+                                if seg['start'] >= 2.0
+                            ]
+                        results.append((chunk_idx, result))
+                    else:
+                        logger.warning(f"Пустой результат для чанка {chunk_idx}")
+                except Exception as e:
+                    logger.error(f"Ошибка при обработке чанка {chunk_idx}: {str(e)}")
                 
-                if not result or not result.get("text", "").strip():
-                    raise ValueError("Пустой результат транскрибации")
-                
-                segments = []
-                if "segments" in result and isinstance(result["segments"], list):
-                    segments = [{
-                        "start": segment.get("start", 0),
-                        "end": segment.get("end", 0),
-                        "text": segment.get("text", "")
-                    } for segment in result["segments"] if isinstance(segment, dict) and segment.get("text")]
-                
+                completed += 1
+                progress = 50 + (45 * completed / len(chunks))
                 yield {
-                    "progress": 100,
-                    "status": "Транскрибация завершена!",
-                    "result": {
-                        "text": result["text"],
-                        "segments": segments
-                    }
+                    "progress": progress,
+                    "status": f"Обработано {completed} из {len(chunks)} чанков"
                 }
+        
+        # Сортируем и объединяем результаты
+        yield {"progress": 95, "status": "Объединение результатов..."}
+        
+        results.sort(key=lambda x: x[0])  # Сортировка по индексу чанка
+        
+        combined_text = ""
+        combined_segments = []
+        
+        for chunk_idx, result in results:
+            if not result or not isinstance(result, dict):
+                continue
                 
+            text = result.get("text", "").strip()
+            segments = result.get("segments", [])
+            
+            # Корректируем временные метки для чанков
+            time_offset = chunk_idx * chunk_duration
+            for segment in segments:
+                segment["start"] += time_offset
+                segment["end"] += time_offset
+                if "words" in segment:
+                    for word in segment["words"]:
+                        word["start"] += time_offset
+                        word["end"] += time_offset
+            
+            combined_text += " " + text
+            combined_segments.extend(segments)
+        
+        # Очистка временных файлов
+        for chunk in chunks:
+            try:
+                os.remove(chunk)
             except Exception as e:
-                error_msg = str(e)
-                if "cannot reshape tensor" in error_msg or "0 elements" in error_msg:
-                    raise ValueError(f"Проблемы с аудио файлом: {error_msg}")
-                else:
-                    raise ValueError(f"Ошибка транскрибации: {error_msg}")
-                    
+                logger.warning(f"Не удалось удалить временный файл {chunk}: {str(e)}")
+        try:
+            os.rmdir(temp_dir)
+        except Exception as e:
+            logger.warning(f"Не удалось удалить временную директорию {temp_dir}: {str(e)}")
+        
+        yield {
+            "progress": 100,
+            "status": "Готово!",
+            "result": {
+                "text": combined_text.strip(),
+                "segments": combined_segments
+            }
+        }
+        
     except Exception as e:
-        logger.error(f"Ошибка в transcribe_audio_with_progress_optimized: {e}")
-        raise e
+        logger.error(f"Критическая ошибка при транскрибации: {str(e)}")
+        yield {
+            "progress": -1,
+            "status": f"Ошибка: {str(e)}",
+            "error": str(e)
+        }
 
 def generate_protocol(transcription, meeting_type="general"):
     """Генерация протокола встречи на основе транскрипции"""
@@ -596,6 +556,247 @@ def generate_protocol(transcription, meeting_type="general"):
         logger.error(f"Ошибка генерации протокола: {e}")
         raise e
 
+@app.route('/')
+def index():
+    """Главная страница"""
+    return render_template('index.html')
+
+@app.route('/upload', methods=['POST'])
+def upload_file():
+    """Загрузка файла"""
+    try:
+        if 'file' not in request.files:
+            return jsonify({'error': 'Файл не выбран'}), 400
+        
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({'error': 'Файл не выбран'}), 400
+        
+        if file and allowed_file(file.filename):
+            filename = secure_filename(file.filename)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"{timestamp}_{filename}"
+            filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+            file.save(filepath)
+            
+            session['uploaded_file'] = filepath
+            
+            return jsonify({
+                'success': True,
+                'filename': filename,
+                'filepath': filepath,
+                'file_type': get_file_type(filename)
+            })
+        else:
+            return jsonify({'error': 'Неподдерживаемый формат файла'}), 400
+            
+    except Exception as e:
+        logger.error(f"Ошибка загрузки файла: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/transcribe', methods=['POST'])
+def transcribe_audio_route():
+    """Маршрут для транскрибации аудио с прогрессом"""
+    # Получаем данные из session и request до создания генератора
+    if 'uploaded_file' not in session or not os.path.exists(session['uploaded_file']):
+        error_msg = json.dumps({'error': 'Файл не найден. Пожалуйста, загрузите файл сначала.'}, ensure_ascii=False)
+        return Response(f"data: {error_msg}\n\n", mimetype='text/event-stream')
+    
+    filepath = session['uploaded_file']
+    language = request.form.get('language', 'auto')
+    
+    def generate():
+        try:
+            current_audio_path = filepath
+            
+            # Если это видео файл, извлекаем аудио
+            if get_file_type(filepath) == 'video':
+                audio_filename = f"audio_{os.path.basename(filepath)}.wav"
+                current_audio_path = os.path.join(app.config['UPLOAD_FOLDER'], audio_filename)
+                
+                yield f"data: {json.dumps({'progress': 5, 'status': 'Извлечение аудио из видео...'}, ensure_ascii=False)}\n\n"
+                
+                if not extract_audio_from_video(filepath, current_audio_path):
+                    yield f"data: {json.dumps({'error': 'Ошибка извлечения аудио из видео'}, ensure_ascii=False)}\n\n"
+                    return
+            
+            # Транскрибация с прогрессом
+            for progress_data in transcribe_audio_with_progress_optimized(current_audio_path, language):
+                yield f"data: {json.dumps(progress_data, ensure_ascii=False)}\n\n"
+            
+        except Exception as e:
+            logger.error(f"Ошибка в generate(): {e}")
+            yield f"data: {json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"
+        finally:
+            # Очистка временных файлов
+            if current_audio_path != filepath and os.path.exists(current_audio_path):
+                try:
+                    os.remove(current_audio_path)
+                except:
+                    pass
+    
+    return Response(generate(), mimetype='text/event-stream')
+
+@app.route('/generate_protocol', methods=['POST'])
+def generate_protocol_route():
+    """Генерация протокола на основе транскрипции"""
+    try:
+        data = request.json
+        transcription = data.get('transcription', '')
+        meeting_type = data.get('meeting_type', 'general')
+        
+        if not transcription:
+            return jsonify({'error': 'Транскрипция не предоставлена'}), 400
+        
+        protocol = generate_protocol(transcription, meeting_type)
+        
+        # Сохранение протокола
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        protocol_filename = f"protocol_{timestamp}.md"
+        protocol_path = os.path.join('.taskmaster/protocols', protocol_filename)
+        
+        with open(protocol_path, 'w', encoding='utf-8') as f:
+            f.write(protocol)
+        
+        return jsonify({
+            'success': True,
+            'protocol': protocol,
+            'filename': protocol_filename
+        })
+        
+    except Exception as e:
+        logger.error(f"Ошибка генерации протокола: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/download_protocol/<filename>')
+def download_protocol(filename):
+    """Скачивание сгенерированного протокола"""
+    try:
+        protocol_path = os.path.join('.taskmaster/protocols', filename)
+        if os.path.exists(protocol_path):
+            return send_file(protocol_path, as_attachment=True)
+        else:
+            return jsonify({'error': 'Файл не найден'}), 404
+    except Exception as e:
+        logger.error(f"Ошибка скачивания протокола: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/cleanup', methods=['POST'])
+def cleanup_session():
+    """Очистка сессии после завершения транскрибации"""
+    try:
+        if 'uploaded_file' in session:
+            file_path = session['uploaded_file']
+            if os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                except:
+                    pass
+            session.pop('uploaded_file', None)
+        
+        return jsonify({'success': True})
+    except Exception as e:
+        logger.error(f"Ошибка очистки сессии: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/health')
+def health_check():
+    """Проверка состояния сервера"""
+    return jsonify({
+        'status': 'healthy',
+        'timestamp': datetime.now().isoformat(),
+        'speed_mode': SPEED_MODE,
+        'model': config['model'],
+        'device': device
+    })
+
+# Конфигурация для разных режимов скорости
+SPEED_CONFIGS = {
+    'fast': {
+        'model_name': 'small',
+        'chunk_duration': 5 * 60,  # 5 минут
+        'fp16': True,
+        'beam_size': 1,
+        'best_of': 1,
+        'temperature': 0.0,
+        'compression_ratio_threshold': 2.4,
+        'logprob_threshold': -1.0,
+        'no_speech_threshold': 0.6,
+        'patience': None
+    },
+    'balanced': {
+        'model_name': 'medium',
+        'chunk_duration': 3 * 60,  # 3 минуты
+        'fp16': True,
+        'beam_size': 3,
+        'best_of': 3,
+        'temperature': 0.2,
+        'compression_ratio_threshold': 2.2,
+        'logprob_threshold': -0.8,
+        'no_speech_threshold': 0.4,
+        'patience': 1
+    },
+    'quality': {
+        'model_name': 'large',
+        'chunk_duration': 2 * 60,  # 2 минуты
+        'fp16': True,
+        'beam_size': 5,
+        'best_of': 5,
+        'temperature': [0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
+        'compression_ratio_threshold': 2.0,
+        'logprob_threshold': -0.5,
+        'no_speech_threshold': 0.3,
+        'patience': 2
+    }
+}
+
+# Глобальные настройки
+MAX_WORKERS = 3  # Максимальное количество параллельных процессов
+CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "whisper")  # Кэш для моделей
+
+# Текущий режим скорости
+SPEED_MODE = 'quality'  # Используем качественный режим по умолчанию
+config = SPEED_CONFIGS[SPEED_MODE]
+
+# Инициализация модели с оптимизациями
+def initialize_model():
+    global model
+    try:
+        # Создаем директорию для кэша, если её нет
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        
+        # Проверяем наличие CUDA
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        if device == "cuda":
+            # Оптимизации для CUDA
+            torch.backends.cudnn.benchmark = True
+            if hasattr(torch.backends, 'cuda'):
+                torch.backends.cuda.matmul.allow_tf32 = True
+        
+        # Загружаем модель с оптимизациями
+        model = whisper.load_model(
+            config['model_name'],
+            device=device,
+            download_root=CACHE_DIR,
+            in_memory=True
+        )
+        
+        # Применяем оптимизации для CPU, если CUDA недоступна
+        if device == "cpu":
+            if torch.backends.mkldnn.is_available():
+                torch.backends.mkldnn.enabled = True
+            torch.set_num_threads(4)  # Ограничиваем количество потоков
+        
+        logger.info(f"Модель {config['model_name']} загружена успешно на {device}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Ошибка при инициализации модели: {str(e)}")
+        return False
+
+# Инициализируем модель при запуске
+if not initialize_model():
+    raise RuntimeError("Не удалось инициализировать модель Whisper")
 @app.route('/')
 def index():
     """Главная страница"""
