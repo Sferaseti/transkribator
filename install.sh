@@ -1,10 +1,15 @@
 #!/bin/bash
 
+# Exit immediately if any command fails
+set -e
+
 # Установка Node.js зависимостей
 npm install
 
 # Установка зависимостей frontend
 cd frontend
+# Clear npm cache to ensure fresh installation
+npm cache clean --force
 rm -rf node_modules
 rm -f package-lock.json
 npm install
