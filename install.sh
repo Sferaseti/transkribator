@@ -17,6 +17,7 @@ npm cache clean --force
 rm -rf node_modules
 rm -f package-lock.json
 npm install
+rm -rf node_modules/.vite
 cd ..
 
 # Создание и активация виртуального окружения Python
