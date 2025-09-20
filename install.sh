@@ -5,6 +5,8 @@ npm install
 
 # Установка зависимостей frontend
 cd frontend
+rm -rf node_modules
+rm -f package-lock.json
 npm install
 cd ..
 
