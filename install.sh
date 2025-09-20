@@ -3,6 +3,11 @@
 # Установка Node.js зависимостей
 npm install
 
+# Установка зависимостей frontend
+cd frontend
+npm install
+cd ..
+
 # Создание и активация виртуального окружения Python
 python3 -m venv venv
 source venv/bin/activate
